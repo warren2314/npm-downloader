@@ -96,4 +96,3 @@ extract_urls
 download_files
 
 echo "Script completed successfully!"
-
