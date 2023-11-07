@@ -27,6 +27,8 @@ function install_npm_package {
         echo "Error: Failed to install npm package."
         exit 1
     fi
+    # Ensure package-lock.json exists
+    docker exec $CONTAINER_ID sh -c "cd /root && npm i --package-lock-only"
     echo "Package installed successfully!"
 }
 
@@ -34,7 +36,12 @@ function check_vulnerabilities {
     echo "Checking for vulnerabilities..."
     VULN_OUTPUT=$(docker exec $CONTAINER_ID npm audit --json)
     VULN_COUNT=$(echo $VULN_OUTPUT | jq .metadata.vulnerabilities.total)
-    echo "Found $VULN_COUNT vulnerabilities!"
+    if ! [[ $VULN_COUNT =~ ^[0-9]+$ ]]; then
+        VULN_COUNT=0
+        echo "Unable to determine the number of vulnerabilities."
+    else
+        echo "Found $VULN_COUNT vulnerabilities!"
+    fi
 }
 
 function extract_urls {
