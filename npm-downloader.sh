@@ -1,6 +1,66 @@
 #!/bin/bash
 
-# Check if package name and 6-digit identifier are provided
+# Functions
+function check_dependencies {
+    for cmd in docker jq wget python3; do
+        if ! command -v $cmd &> /dev/null; then
+            echo "Error: $cmd is not installed."
+            exit 1
+        fi
+    done
+}
+
+function start_docker_container {
+    echo "Starting Docker container..."
+    CONTAINER_ID=$(docker run -d node:latest tail -f /dev/null)
+    if [ -z "$CONTAINER_ID" ]; then
+        echo "Error: Failed to start Docker container."
+        exit 1
+    fi
+    echo "Docker container started with ID: $CONTAINER_ID"
+}
+
+function install_npm_package {
+    echo "Initializing npm and installing package..."
+    docker exec $CONTAINER_ID sh -c "cd /root && npm init -y > /dev/null && npm install $PACKAGE@$VERSION" 2> $OUTPUT_DIR/npm_warnings.txt
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to install npm package."
+        exit 1
+    fi
+    # Ensure package-lock.json exists
+    docker exec $CONTAINER_ID sh -c "cd /root && npm i --package-lock-only"
+    echo "Package installed successfully!"
+}
+
+function check_vulnerabilities {
+    echo "Checking for vulnerabilities..."
+    VULN_OUTPUT=$(docker exec $CONTAINER_ID npm audit --json)
+    VULN_COUNT=$(echo $VULN_OUTPUT | jq .metadata.vulnerabilities.total)
+    if ! [[ $VULN_COUNT =~ ^[0-9]+$ ]]; then
+        VULN_COUNT=0
+        echo "Unable to determine the number of vulnerabilities."
+    else
+        echo "Found $VULN_COUNT vulnerabilities!"
+    fi
+}
+
+function extract_urls {
+    grep -oP '"resolved": "\K[^"]+.tgz' $OUTPUT_DIR/package-lock.json > $OUTPUT_DIR/npm.txt
+    sort -u $OUTPUT_DIR/npm.txt -o $OUTPUT_DIR/npm.txt
+    echo "URLs to be downloaded:"
+    cat $OUTPUT_DIR/npm.txt
+}
+
+function download_files {
+    while read url; do
+        echo "Downloading: $url"
+        wget -P $DIR_NAME $url
+    done < $OUTPUT_DIR/npm.txt
+}
+
+# Main script
+check_dependencies
+
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <npm_package> [version] <6-digit-identifier>"
     exit 1
@@ -8,7 +68,6 @@ fi
 
 PACKAGE=$1
 
-# Check if version is provided, else set default to 'latest'
 if [[ "$#" == 3 ]]; then
     VERSION=$2
     IDENTIFIER=$3
@@ -17,50 +76,24 @@ else
     IDENTIFIER=$2
 fi
 
-# Set the output directory to ~/Downloads
-OUTPUT_DIR=~/Downloads
-
-# Start a Docker container with node:latest
-CONTAINER_ID=$(docker run -d node:18 tail -f /dev/null)
-
-# Handle container cleanup on exit
-function cleanup {
-    docker rm -f $CONTAINER_ID
-}
-trap cleanup EXIT
-
-# Install the package and save npm warnings to ~/Downloads/npm_warnings.txt
-docker exec $CONTAINER_ID sh -c "cd /root && npm install $PACKAGE@$VERSION" 2> $OUTPUT_DIR/npm_warnings.txt
-
-# Check for vulnerabilities
-VULN_OUTPUT=$(docker exec $CONTAINER_ID npm audit --json)
-VULN_COUNT=$(echo $VULN_OUTPUT | jq .metadata.vulnerabilities.total)
-
-echo "Number of vulnerabilities found: $VULN_COUNT"
-
-# If vulnerabilities exist, save the output to ~/Downloads/audit_output.json and convert to CSV 
-if [ "$VULN_COUNT" -gt "0" ]; then
-    echo $VULN_OUTPUT > $OUTPUT_DIR/audit_output.json
-    python3 json_to_csv.py $OUTPUT_DIR/audit_output.json > $OUTPUT_DIR/audit_output.csv
+# Ensure the identifier is numeric and 6 digits
+if ! [[ $IDENTIFIER =~ ^[0-9]{6}$ ]]; then
+    echo "Error: Identifier must be a 6-digit number."
+    exit 1
 fi
 
-# Extract the package-lock.json to ~/Downloads
-docker cp $CONTAINER_ID:/root/package-lock.json $OUTPUT_DIR/package-lock.json
-
-# Process the package-lock.json to extract the URLs and save to ~/Downloads/npm.txt
-python3 extract_urls.py $OUTPUT_DIR/package-lock.json > $OUTPUT_DIR/npm.txt
-
-# Log all URLs that will be downloaded
-echo "URLs to be downloaded:"
-cat $OUTPUT_DIR/npm.txt
-
-# Create a directory named WO followed by the provided 6 digits inside ~/Downloads
+OUTPUT_DIR=~/Downloads
 DIR_NAME="$OUTPUT_DIR/WO$IDENTIFIER"
 mkdir -p $DIR_NAME
 
-# wget each URL in ~/Downloads/npm.txt inside the WO<6-digit-identifier> directory
-while read url; do
-    echo "Downloading: $url"
-    wget -P $DIR_NAME $url
-done < $OUTPUT_DIR/npm.txt
+start_docker_container
+trap 'docker rm -f $CONTAINER_ID' EXIT
+
+install_npm_package
+check_vulnerabilities
+docker cp $CONTAINER_ID:/root/package-lock.json $OUTPUT_DIR/package-lock.json
+extract_urls
+download_files
+
+echo "Script completed successfully!"
 
